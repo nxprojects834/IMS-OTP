@@ -141,11 +141,22 @@ module.exports = (bot) => {
         edit(chatId, msgId, '❌ Sesi habis. Gunakan /order lagi.');
         return;
       }
-
+      
       edit(chatId, msgId, `⏳ Memesan *${serviceCode}* di negara *${countryId}*...`);
 
       try {
-        const order = await api.buyNumber(serviceCode, countryId);
+        let providerId = '';
+        try {
+          const operators = await api.getOperators(serviceCode, countryId);
+          const availableOps = operators.filter(op => op.count > 0);
+          
+          if (availableOps.length > 0) {
+            providerId = availableOps[0].provider_id;
+          }
+        } catch (opErr) {
+          console.error('Gagal ambil operator:', opErr.message);
+        }
+        const order = await api.buyNumber(serviceCode, countryId, providerId);
         clearState(chatId);
 
         saveOrder(chatId, {
