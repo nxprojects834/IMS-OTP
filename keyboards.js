@@ -1,26 +1,22 @@
 const api = require('./api');
 
-// Cache TTL 5 menit
+// ─── Cache ────────────────────────────────────────────────────────────────────
 let countriesCache = null;
 let countriesCacheTime = 0;
 const CACHE_TTL = 5 * 60 * 1000;
 
-const PAGE_SIZE_COUNTRY = 20; // 10 baris × 2 kolom
-const PAGE_SIZE_SERVICE = 20; // 10 baris × 2 kolom
+// Simpan daftar service per negara sementara (untuk pagination & search)
+const servicesCache = {};
 
-// ─── Build keyboard dengan pagination ────────────────────────────────────────
-function buildKeyboardPaged(items, prefix, page = 0, pageSize = PAGE_SIZE_COUNTRY, extraRows = []) {
-  const totalPages = Math.ceil(items.length / pageSize);
-  const start = page * pageSize;
-  const slice = items.slice(start, start + pageSize);
+const PAGE_SIZE = 20; // 10 baris × 2 kolom
 
-  if (slice.length === 0) {
-    return {
-      inline_keyboard: [[
-        { text: '❌ Tidak ada pilihan tersedia', callback_data: 'none' }
-      ]]
-    };
-  }
+// ─── Build keyboard paged ─────────────────────────────────────────────────────
+// navData: string tambahan yang disertakan di callback Next/Back (misal countryId)
+function buildKeyboardPaged(items, prefix, page, navData, extraRows = []) {
+  const totalPages = Math.ceil(items.length / PAGE_SIZE);
+  const clampedPage = Math.max(0, Math.min(page, totalPages - 1));
+  const start = clampedPage * PAGE_SIZE;
+  const slice = items.slice(start, start + PAGE_SIZE);
 
   const rows = [];
   for (let i = 0; i < slice.length; i += 2) {
@@ -36,89 +32,101 @@ function buildKeyboardPaged(items, prefix, page = 0, pageSize = PAGE_SIZE_COUNTR
     rows.push(row);
   }
 
-  // ─── Baris navigasi ───────────────────────────────────────────────────────
+  // Navigasi — format: "pg_{prefix}:{page}_{navData}"
   const navRow = [];
-  if (page > 0) {
-    navRow.push({ text: '⬅️ Back', callback_data: `page_${prefix}:${page - 1}` });
+  if (clampedPage > 0) {
+    navRow.push({
+      text: '⬅️ Back',
+      callback_data: `pg_${prefix}:${clampedPage - 1}_${navData}`
+    });
   }
-  navRow.push({ text: `📄 ${page + 1}/${totalPages}`, callback_data: 'none' });
-  if (page < totalPages - 1) {
-    navRow.push({ text: 'Next ➡️', callback_data: `page_${prefix}:${page + 1}` });
+  navRow.push({ text: `📄 ${clampedPage + 1}/${totalPages}`, callback_data: 'none' });
+  if (clampedPage < totalPages - 1) {
+    navRow.push({
+      text: 'Next ➡️',
+      callback_data: `pg_${prefix}:${clampedPage + 1}_${navData}`
+    });
   }
-
   rows.push(navRow);
 
-  // ─── Extra rows (mis. tombol Kembali ke Menu Utama) ───────────────────────
   for (const row of extraRows) rows.push(row);
 
   return { inline_keyboard: rows };
 }
 
 // ─── Keyboard Negara ──────────────────────────────────────────────────────────
-async function countryKeyboard(page = 0) {
-  try {
-    const now = Date.now();
-    if (!countriesCache || now - countriesCacheTime > CACHE_TTL) {
-      const data = await api.getCountries();
-      countriesCache = data
-        .filter(c => c.visible === 1)
-        .map(c => ({
-          label: c.name,
-          value: String(c.id)
-        }));
-      countriesCacheTime = now;
-    }
-
-    const extraRows = [
-      [{ text: '🏠 Menu Utama', callback_data: 'main_menu' }]
-    ];
-    return buildKeyboardPaged(countriesCache, 'country', page, PAGE_SIZE_COUNTRY, extraRows);
-  } catch {
-    return buildKeyboardPaged([
-      { label: '🇮🇩 Indonesia', value: '6' }
-    ], 'country', 0, PAGE_SIZE_COUNTRY, [
-      [{ text: '🏠 Menu Utama', callback_data: 'main_menu' }]
-    ]);
+async function countryKeyboard(page = 0, filter = '') {
+  const now = Date.now();
+  if (!countriesCache || now - countriesCacheTime > CACHE_TTL) {
+    const data = await api.getCountries();
+    countriesCache = data
+      .filter(c => c.visible === 1)
+      .map(c => ({ label: c.name, value: String(c.id), name: c.name.toLowerCase() }));
+    countriesCacheTime = now;
   }
-}
 
-// ─── Keyboard Layanan per Negara ──────────────────────────────────────────────
-async function serviceKeyboard(countryId, page = 0) {
-  try {
-    const services = await api.getServicesByCountry(countryId);
-    if (services.length === 0) {
-      return {
-        inline_keyboard: [
-          [{ text: '❌ Tidak ada service tersedia', callback_data: 'none' }],
-          [{ text: '⬅️ Kembali', callback_data: 'restart' },
-           { text: '🏠 Menu Utama', callback_data: 'main_menu' }]
-        ]
-      };
-    }
+  const list = filter
+    ? countriesCache.filter(c => c.name.includes(filter.toLowerCase()))
+    : countriesCache;
 
-    const items = services
-      .sort((a, b) => a.price - b.price)
-      .map(s => ({
-        label: `${s.name} — Rp ${s.price.toLocaleString('id-ID')} (${s.count})`,
-        value: `${s.service}|${countryId}|${page}` // simpan page untuk back
-      }));
-
-    const extraRows = [
-      [
-        { text: '⬅️ Pilih Negara Lain', callback_data: 'restart' },
-        { text: '🏠 Menu Utama', callback_data: 'main_menu' }
-      ]
-    ];
-    return buildKeyboardPaged(items, 'service', page, PAGE_SIZE_SERVICE, extraRows);
-  } catch {
+  if (list.length === 0) {
     return {
       inline_keyboard: [
-        [{ text: '❌ Gagal memuat service', callback_data: 'none' }],
-        [{ text: '⬅️ Kembali', callback_data: 'restart' },
+        [{ text: `❌ Negara "${filter}" tidak ditemukan`, callback_data: 'none' }],
+        [{ text: '🔍 Cari Lagi', callback_data: 'search_country' },
          { text: '🏠 Menu Utama', callback_data: 'main_menu' }]
       ]
     };
   }
+
+  const items = list.map(c => ({ label: c.label, value: c.value }));
+  const extraRows = [
+    [{ text: '🔍 Cari Negara', callback_data: 'search_country' },
+     { text: '🏠 Menu Utama', callback_data: 'main_menu' }]
+  ];
+  // navData = '' (tidak perlu data ekstra untuk negara)
+  return buildKeyboardPaged(items, 'country', page, '', extraRows);
+}
+
+// ─── Keyboard Layanan ─────────────────────────────────────────────────────────
+async function serviceKeyboard(countryId, page = 0, filter = '') {
+  // Fetch & cache per countryId
+  if (!servicesCache[countryId]) {
+    const services = await api.getServicesByCountry(countryId);
+    servicesCache[countryId] = services
+      .sort((a, b) => a.price - b.price)
+      .map(s => ({
+        label: `${s.name} — Rp ${s.price.toLocaleString('id-ID')} (${s.count})`,
+        value: `${s.service}|${countryId}`,   // ← hanya serviceCode|countryId, TANPA page
+        name: s.name.toLowerCase()
+      }));
+    // expire cache service setelah 3 menit
+    setTimeout(() => { delete servicesCache[countryId]; }, 3 * 60 * 1000);
+  }
+
+  const list = filter
+    ? servicesCache[countryId].filter(s => s.name.includes(filter.toLowerCase()))
+    : servicesCache[countryId];
+
+  if (list.length === 0) {
+    return {
+      inline_keyboard: [
+        [{ text: `❌ Service "${filter}" tidak ditemukan`, callback_data: 'none' }],
+        [{ text: '🔍 Cari Lagi', callback_data: `search_service:${countryId}` },
+         { text: '⬅️ Negara Lain', callback_data: 'restart' }],
+        [{ text: '🏠 Menu Utama', callback_data: 'main_menu' }]
+      ]
+    };
+  }
+
+  const items = list.map(s => ({ label: s.label, value: s.value }));
+  const extraRows = [
+    [{ text: '🔍 Cari Service', callback_data: `search_service:${countryId}` },
+     { text: '⬅️ Negara Lain', callback_data: 'restart' }],
+    [{ text: '🏠 Menu Utama', callback_data: 'main_menu' }]
+  ];
+  // navData = countryId agar Next/Back tahu harus ke negara mana
+  return buildKeyboardPaged(items, 'service', page, countryId, extraRows);
 }
 
 // ─── Tombol Aksi Order ────────────────────────────────────────────────────────
@@ -129,19 +137,10 @@ function orderButtons(orderId) {
         { text: '📨 Cek OTP', callback_data: `check:${orderId}` },
         { text: '🔁 SMS Ulang', callback_data: `resend:${orderId}` }
       ],
-      [
-        { text: '❌ Batalkan', callback_data: `cancel:${orderId}` }
-      ],
-      [
-        { text: '🏠 Menu Utama', callback_data: 'main_menu' }
-      ]
+      [{ text: '❌ Batalkan', callback_data: `cancel:${orderId}` }],
+      [{ text: '🏠 Menu Utama', callback_data: 'main_menu' }]
     ]
   };
 }
 
-module.exports = {
-  countryKeyboard,
-  serviceKeyboard,
-  orderButtons,
-  countriesCache: () => countriesCache // ekspor getter untuk pagination service
-};
+module.exports = { countryKeyboard, serviceKeyboard, orderButtons };

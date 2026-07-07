@@ -18,64 +18,126 @@ module.exports = (bot) => {
       ...opts
     });
 
+  // ─── Helper parse callback_data ───────────────────────────────────────────
+  // Format: "action:value"  — value bisa mengandung ':' (misal orderId berbentuk angka saja)
+  function parseQuery(data) {
+    const idx = data.indexOf(':');
+    if (idx === -1) return { action: data, value: '' };
+    return { action: data.slice(0, idx), value: data.slice(idx + 1) };
+  }
+
+  // ─── Callback Query Handler ───────────────────────────────────────────────
   bot.on('callback_query', async (query) => {
     const chatId = query.message.chat.id;
-    const msgId = query.message.message_id;
-
-    // Pisahkan action dari value dengan benar (nilai bisa mengandung ':')
-    const colonIdx = query.data.indexOf(':');
-    const action = colonIdx === -1 ? query.data : query.data.slice(0, colonIdx);
-    const value  = colonIdx === -1 ? ''           : query.data.slice(colonIdx + 1);
+    const msgId  = query.message.message_id;
+    const { action, value } = parseQuery(query.data);
 
     await bot.answerCallbackQuery(query.id);
 
-    // ── Pagination Negara ─────────────────────────────────────────────────────
-    if (action === 'page_country') {
-      const page = parseInt(value) || 0;
+    // ── Pagination Negara: "pg_country:{page}_"
+    if (action === 'pg_country') {
+      const [pageStr] = value.split('_');
+      const page = parseInt(pageStr) || 0;
       const keyboard = await countryKeyboard(page);
       edit(chatId, msgId, '🌍 *Pilih Negara:*', { reply_markup: keyboard });
     }
 
-    // ── Pagination Service ────────────────────────────────────────────────────
-    else if (action === 'page_service') {
-      // value = "page|countryId"
-      const [pageStr, countryId] = value.split('|');
-      const page = parseInt(pageStr) || 0;
-      await edit(chatId, msgId, `⏳ Memuat layanan...`);
+    // ── Pagination Service: "pg_service:{page}_{countryId}"
+    else if (action === 'pg_service') {
+      // value = "page_countryId"  (underscore sebagai separator)
+      const underIdx = value.indexOf('_');
+      const page      = parseInt(value.slice(0, underIdx)) || 0;
+      const countryId = value.slice(underIdx + 1);
+
+      if (!countryId) {
+        edit(chatId, msgId, '❌ Sesi habis, silakan pilih negara lagi.', {
+          reply_markup: { inline_keyboard: [[{ text: '🔄 Pilih Negara', callback_data: 'restart' }]] }
+        });
+        return;
+      }
+
+      await edit(chatId, msgId, '⏳ Memuat halaman...');
       const keyboard = await serviceKeyboard(countryId, page);
       edit(chatId, msgId,
-        `🌍 ID Negara: *${countryId}*\n\n📦 *Pilih Service:*`,
+        `🌍 Negara ID: *${countryId}*\n\n📦 *Pilih Service:*`,
         { reply_markup: keyboard }
       );
     }
 
-    // ── Menu Utama ────────────────────────────────────────────────────────────
+    // ── Menu Utama
     else if (action === 'main_menu') {
       clearState(chatId);
-      // Hapus pesan inline lama, kirim menu utama baru
       try { await bot.deleteMessage(chatId, msgId); } catch {}
       send(chatId, '🏠 *Menu Utama*\nPilih menu di bawah ini:', { reply_markup: MAIN_MENU });
     }
 
-    // ── Pilih Negara ─────────────────────────────────────────────────────────
-    else if (action === 'country') {
-      setState(chatId, { countryId: value });
-      await edit(chatId, msgId, `⏳ Memuat layanan...`);
+    // ── Mulai pencarian negara
+    else if (action === 'search_country') {
+      setState(chatId, { mode: 'searching_country', searchMsgId: msgId });
+      send(chatId,
+        '🔍 *Cari Negara*\n\nKetik nama negara yang ingin dicari:\n_(contoh: indonesia, india, japan)_',
+        {
+          reply_markup: {
+            inline_keyboard: [[{ text: '❌ Batal', callback_data: 'cancel_search' }]]
+          }
+        }
+      );
+    }
 
-      const keyboard = await serviceKeyboard(value, 0);
+    // ── Mulai pencarian service: "search_service:{countryId}"
+    else if (action === 'search_service') {
+      const countryId = value;
+      setState(chatId, { mode: 'searching_service', countryId, searchMsgId: msgId });
+      send(chatId,
+        '🔍 *Cari Service*\n\nKetik nama service yang ingin dicari:\n_(contoh: whatsapp, telegram, google)_',
+        {
+          reply_markup: {
+            inline_keyboard: [[{ text: '❌ Batal', callback_data: `cancel_service_search:${countryId}` }]]
+          }
+        }
+      );
+    }
+
+    // ── Batal cari service: "cancel_service_search:{countryId}"
+    else if (action === 'cancel_service_search') {
+      const countryId = value;
+      clearState(chatId);
+      await edit(chatId, msgId, '⏳ Kembali ke daftar service...');
+      const keyboard = await serviceKeyboard(countryId, 0);
       edit(chatId, msgId,
-        `🌍 ID Negara: *${value}*\n\n📦 *Pilih Service:*`,
+        `🌍 Negara ID: *${countryId}*\n\n📦 *Pilih Service:*`,
         { reply_markup: keyboard }
       );
     }
 
-    // ── Pilih Service → Buat Order ───────────────────────────────────────────
-    else if (action === 'service') {
-      // value = "serviceCode|countryId|page"
-      const [serviceCode, countryId] = value.split('|');
-      const state = getState(chatId);
+    // ── Batal cari negara
+    else if (action === 'cancel_search') {
+      clearState(chatId);
+      await edit(chatId, msgId, '⏳ Kembali ke daftar negara...');
+      const keyboard = await countryKeyboard(0);
+      edit(chatId, msgId, '🌍 *Pilih Negara:*', { reply_markup: keyboard });
+    }
 
-      if (!countryId) {
+    // ── Pilih Negara: "country:{countryId}"
+    else if (action === 'country') {
+      const countryId = value;  // value = countryId murni (string angka)
+      setState(chatId, { countryId, mode: null });
+      await edit(chatId, msgId, '⏳ Memuat layanan...');
+      const keyboard = await serviceKeyboard(countryId, 0);
+      edit(chatId, msgId,
+        `🌍 Negara ID: *${countryId}*\n\n📦 *Pilih Service:*`,
+        { reply_markup: keyboard }
+      );
+    }
+
+    // ── Pilih Service → Buat Order: "service:{serviceCode}|{countryId}"
+    else if (action === 'service') {
+      // value = "serviceCode|countryId"
+      const pipeIdx   = value.indexOf('|');
+      const serviceCode = value.slice(0, pipeIdx);
+      const countryId   = value.slice(pipeIdx + 1);
+
+      if (!serviceCode || !countryId) {
         edit(chatId, msgId, '❌ Sesi habis. Gunakan /order lagi.');
         return;
       }
@@ -97,8 +159,7 @@ module.exports = (bot) => {
         updateUser(chatId, { totalOrder: (user.totalOrder || 0) + 1 });
 
         edit(chatId, msgId,
-          formatOrder(order) +
-          `\n\n🔔 _OTP akan masuk otomatis, tunggu notifikasi..._`,
+          formatOrder(order) + `\n\n🔔 _OTP akan masuk otomatis, tunggu notifikasi..._`,
           { reply_markup: orderButtons(order.order_id) }
         );
 
@@ -106,13 +167,12 @@ module.exports = (bot) => {
 
       } catch (err) {
         edit(chatId, msgId,
-          `❌ *Gagal memesan!*\n\n` +
-          `Service *${serviceCode}* tidak tersedia saat ini.\n` +
-          `_${err.message}_`, {
+          `❌ *Gagal memesan!*\n\nService *${serviceCode}* tidak tersedia saat ini.\n_${err.message}_`,
+          {
             reply_markup: {
               inline_keyboard: [
                 [
-                  { text: '🔄 Coba Negara Sama', callback_data: `country:${countryId}` },
+                  { text: '🔄 Coba Lagi', callback_data: `country:${countryId}` },
                   { text: '🔄 Negara Lain', callback_data: 'restart' }
                 ],
                 [{ text: '🏠 Menu Utama', callback_data: 'main_menu' }]
@@ -123,7 +183,7 @@ module.exports = (bot) => {
       }
     }
 
-    // ── Cek OTP ──────────────────────────────────────────────────────────────
+    // ── Cek OTP
     else if (action === 'check') {
       try {
         const result = await api.checkOrder(value);
@@ -133,7 +193,7 @@ module.exports = (bot) => {
       }
     }
 
-    // ── Kirim Ulang SMS ──────────────────────────────────────────────────────
+    // ── Kirim Ulang SMS
     else if (action === 'resend') {
       try {
         await api.resendSms(value);
@@ -146,23 +206,19 @@ module.exports = (bot) => {
       }
     }
 
-    // ── Batalkan Order ───────────────────────────────────────────────────────
+    // ── Batalkan Order
     else if (action === 'cancel') {
       try {
         const result = await api.cancelOrder(value);
         send(chatId,
-          `✅ *Order Dibatalkan!*\n` +
-          `🆔 Order: \`${value}\`\n` +
-          `💰 Refund: *Rp ${Number(result.refunded).toLocaleString('id-ID')}*`,
+          `✅ *Order Dibatalkan!*\n🆔 Order: \`${value}\`\n💰 Refund: *Rp ${Number(result.refunded).toLocaleString('id-ID')}*`,
           { reply_markup: { inline_keyboard: [[{ text: '🏠 Menu Utama', callback_data: 'main_menu' }]] } }
         );
       } catch (err) {
         if (err.error_code === 'CANCEL_TOO_EARLY') {
           const menit = Math.ceil(err.wait_seconds / 60);
           send(chatId,
-            `⏳ *Belum bisa dibatalkan!*\n` +
-            `Tunggu sekitar *${menit} menit* lagi.\n` +
-            `_(Min. 2 menit setelah order)_`,
+            `⏳ *Belum bisa dibatalkan!*\nTunggu sekitar *${menit} menit* lagi.\n_(Min. 2 menit setelah order)_`,
             { reply_markup: orderButtons(value) }
           );
         } else {
@@ -171,19 +227,55 @@ module.exports = (bot) => {
       }
     }
 
-    // ── Restart Pilih Negara ─────────────────────────────────────────────────
+    // ── Restart ke Pilih Negara
     else if (action === 'restart') {
-      setState(chatId, {});
+      setState(chatId, { mode: null });
       const keyboard = await countryKeyboard(0);
       edit(chatId, msgId, '🌍 *Pilih Negara:*', { reply_markup: keyboard });
     }
 
-    // ── Tombol Kosong ────────────────────────────────────────────────────────
+    // ── Tombol kosong
     else if (action === 'none') {
       await bot.answerCallbackQuery(query.id, {
-        text: '❌ Tidak ada pilihan tersedia.',
-        show_alert: true
+        text: 'ℹ️ Ini adalah info halaman.',
+        show_alert: false
       });
+    }
+  });
+
+  // ─── Text Handler untuk Search ────────────────────────────────────────────
+  bot.on('message', async (msg) => {
+    if (!msg.text || msg.text.startsWith('/')) return;
+    const chatId = msg.chat.id;
+    const state  = getState(chatId);
+
+    // Mode cari negara
+    if (state.mode === 'searching_country') {
+      const query = msg.text.trim();
+      clearState(chatId);
+
+      const keyboard = await countryKeyboard(0, query);
+      bot.sendMessage(chatId,
+        `🔍 Hasil pencarian: *"${query}"*\n\n🌍 Pilih negara:`,
+        { parse_mode: 'Markdown', reply_markup: keyboard }
+      );
+    }
+
+    // Mode cari service
+    else if (state.mode === 'searching_service') {
+      const query     = msg.text.trim();
+      const countryId = state.countryId;
+      clearState(chatId);
+
+      try {
+        const keyboard = await serviceKeyboard(countryId, 0, query);
+        bot.sendMessage(chatId,
+          `🔍 Hasil pencarian: *"${query}"*\n🌍 Negara ID: *${countryId}*\n\n📦 Pilih service:`,
+          { parse_mode: 'Markdown', reply_markup: keyboard }
+        );
+      } catch {
+        bot.sendMessage(chatId, '❌ Gagal mencari service.');
+      }
     }
   });
 };
