@@ -4,7 +4,6 @@ const { serviceKeyboard, orderButtons, countryKeyboard } = require('../keyboards
 const { formatOrder, formatOtp } = require('../utils/formatter');
 const { saveOrder, updateUser, getUser } = require('../utils/db');
 const { startWatch } = require('../utils/autocheck');
-const { MAIN_MENU } = require('../utils/menu');
 
 module.exports = (bot) => {
   const send = (chatId, text, opts = {}) =>
@@ -21,48 +20,17 @@ module.exports = (bot) => {
   bot.on('callback_query', async (query) => {
     const chatId = query.message.chat.id;
     const msgId = query.message.message_id;
-
-    // Pisahkan action dari value dengan benar (nilai bisa mengandung ':')
-    const colonIdx = query.data.indexOf(':');
-    const action = colonIdx === -1 ? query.data : query.data.slice(0, colonIdx);
-    const value  = colonIdx === -1 ? ''           : query.data.slice(colonIdx + 1);
+    const [action, value] = query.data.split(':');
 
     await bot.answerCallbackQuery(query.id);
 
-    // ── Pagination Negara ─────────────────────────────────────────────────────
-    if (action === 'page_country') {
-      const page = parseInt(value) || 0;
-      const keyboard = await countryKeyboard(page);
-      edit(chatId, msgId, '🌍 *Pilih Negara:*', { reply_markup: keyboard });
-    }
-
-    // ── Pagination Service ────────────────────────────────────────────────────
-    else if (action === 'page_service') {
-      // value = "page|countryId"
-      const [pageStr, countryId] = value.split('|');
-      const page = parseInt(pageStr) || 0;
-      await edit(chatId, msgId, `⏳ Memuat layanan...`);
-      const keyboard = await serviceKeyboard(countryId, page);
-      edit(chatId, msgId,
-        `🌍 ID Negara: *${countryId}*\n\n📦 *Pilih Service:*`,
-        { reply_markup: keyboard }
-      );
-    }
-
-    // ── Menu Utama ────────────────────────────────────────────────────────────
-    else if (action === 'main_menu') {
-      clearState(chatId);
-      // Hapus pesan inline lama, kirim menu utama baru
-      try { await bot.deleteMessage(chatId, msgId); } catch {}
-      send(chatId, '🏠 *Menu Utama*\nPilih menu di bawah ini:', { reply_markup: MAIN_MENU });
-    }
-
     // ── Pilih Negara ─────────────────────────────────────────────────────────
-    else if (action === 'country') {
+    if (action === 'country') {
+      // value = countryId (numerik string, misal "6")
       setState(chatId, { countryId: value });
       await edit(chatId, msgId, `⏳ Memuat layanan...`);
 
-      const keyboard = await serviceKeyboard(value, 0);
+      const keyboard = await serviceKeyboard(value);
       edit(chatId, msgId,
         `🌍 ID Negara: *${value}*\n\n📦 *Pilih Service:*`,
         { reply_markup: keyboard }
@@ -71,7 +39,7 @@ module.exports = (bot) => {
 
     // ── Pilih Service → Buat Order ───────────────────────────────────────────
     else if (action === 'service') {
-      // value = "serviceCode|countryId|page"
+      // value = "serviceCode|countryId"  (dikirim dari serviceKeyboard)
       const [serviceCode, countryId] = value.split('|');
       const state = getState(chatId);
 
@@ -86,6 +54,7 @@ module.exports = (bot) => {
         const order = await api.buyNumber(serviceCode, countryId);
         clearState(chatId);
 
+        // Simpan ke DB lokal
         saveOrder(chatId, {
           id: order.order_id,
           phone: order.phone,
@@ -111,11 +80,8 @@ module.exports = (bot) => {
           `_${err.message}_`, {
             reply_markup: {
               inline_keyboard: [
-                [
-                  { text: '🔄 Coba Negara Sama', callback_data: `country:${countryId}` },
-                  { text: '🔄 Negara Lain', callback_data: 'restart' }
-                ],
-                [{ text: '🏠 Menu Utama', callback_data: 'main_menu' }]
+                [{ text: '🔄 Pilih Negara Lain', callback_data: 'restart' }],
+                [{ text: '🔄 Coba Negara Sama', callback_data: `country:${countryId}` }]
               ]
             }
           }
@@ -153,8 +119,7 @@ module.exports = (bot) => {
         send(chatId,
           `✅ *Order Dibatalkan!*\n` +
           `🆔 Order: \`${value}\`\n` +
-          `💰 Refund: *Rp ${Number(result.refunded).toLocaleString('id-ID')}*`,
-          { reply_markup: { inline_keyboard: [[{ text: '🏠 Menu Utama', callback_data: 'main_menu' }]] } }
+          `💰 Refund: *Rp ${Number(result.refunded).toLocaleString('id-ID')}*`
         );
       } catch (err) {
         if (err.error_code === 'CANCEL_TOO_EARLY') {
@@ -174,7 +139,7 @@ module.exports = (bot) => {
     // ── Restart Pilih Negara ─────────────────────────────────────────────────
     else if (action === 'restart') {
       setState(chatId, {});
-      const keyboard = await countryKeyboard(0);
+      const keyboard = await countryKeyboard();
       edit(chatId, msgId, '🌍 *Pilih Negara:*', { reply_markup: keyboard });
     }
 
